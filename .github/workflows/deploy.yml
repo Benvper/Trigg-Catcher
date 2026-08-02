@@ -1,0 +1,48 @@
+name: Deploy to Trigger.dev
+
+# Push to main always deploys to STAGING only — never production.
+# Production is only ever deployed by manually running this workflow from
+# the GitHub Actions tab and choosing "prod" — a deliberate human action,
+# not something a push can trigger by accident.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy to"
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - prod
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run typecheck
+
+  deploy:
+    needs: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+
+      - name: Deploy to Trigger.dev
+        env:
+          TRIGGER_ACCESS_TOKEN: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
+        run: |
+          ENV="${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}"
+          echo "Deploying to: $ENV"
+          npx trigger.dev@4.5.9 deploy --env "$ENV"
