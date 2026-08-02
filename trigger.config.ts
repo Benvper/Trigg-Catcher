@@ -1,8 +1,10 @@
 import { defineConfig } from "@trigger.dev/sdk";
 
 export default defineConfig({
-  // Replace with your project ref from cloud.trigger.dev → Project → Settings.
-  project: process.env.TRIGGER_PROJECT_REF ?? "proj_REPLACE_ME",
+  // Not a secret — this identifies the project, it doesn't grant access.
+  // Auth comes from TRIGGER_ACCESS_TOKEN / the CLI login session instead,
+  // so this can be committed directly (CI has no access to local .env).
+  project: "proj_faqoxguqmnoyjvmvbsoc",
   dirs: ["./src/trigger"],
   maxDuration: 900,
   retries: {
