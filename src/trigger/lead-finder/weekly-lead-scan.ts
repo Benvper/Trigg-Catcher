@@ -25,7 +25,9 @@ export const weeklyLeadScan = schedules.task({
     // Handles EST/EDT automatically — 8 AM local year round.
     timezone: "America/New_York",
   },
-  maxDuration: 900,
+  // Covers discovery's own larger maxDuration plus enrichment, pitch
+  // generation, and the digest send.
+  maxDuration: 1800,
 
   run: async () => {
     const targetCount = Number(process.env.LEADS_PER_WEEK ?? 10);
@@ -44,11 +46,21 @@ export const weeklyLeadScan = schedules.task({
       );
     }
 
-    logger.info("Starting weekly lead scan", { targetCount, verticals });
+    // Discover more candidates than needed — most small local businesses
+    // have no email on file anywhere, so a large share get dropped after
+    // enrichment. Oversampling here is what lets the digest still land
+    // close to targetCount emailed leads.
+    const discoveryTarget = targetCount * 4;
+
+    logger.info("Starting weekly lead scan", {
+      targetCount,
+      discoveryTarget,
+      verticals,
+    });
 
     // --- 1. Find businesses -----------------------------------------
     const discovery = await discoverBusinesses.triggerAndWait({
-      targetCount,
+      targetCount: discoveryTarget,
       verticals,
     });
 
@@ -71,7 +83,12 @@ export const weeklyLeadScan = schedules.task({
     }
 
     // --- 2. Find contact details ------------------------------------
-    const enrichment = await enrichContacts.triggerAndWait({ businesses });
+    // enrichContacts drops any business with no email found — a lead with
+    // only a phone number isn't usable for an email outreach campaign.
+    const enrichment = await enrichContacts.triggerAndWait({
+      businesses,
+      targetCount,
+    });
 
     if (!enrichment.ok) {
       logger.error("Enrichment failed", { error: enrichment.error });
@@ -79,6 +96,27 @@ export const weeklyLeadScan = schedules.task({
     }
 
     const { leads, creditsSpent, creditsRemaining } = enrichment.output;
+
+    if (leads.length < targetCount) {
+      logger.warn("Fewer emailed leads found than targeted this week", {
+        found: leads.length,
+        targetCount,
+      });
+    }
+
+    if (leads.length === 0) {
+      logger.warn("No leads with a usable email this week — sending an empty digest");
+      await sendDigest.triggerAndWait({
+        leads: [],
+        creditsRemaining,
+        creditsSpent,
+        totalFound,
+      });
+      return {
+        leads: 0,
+        note: "No businesses with a public email were found this week.",
+      };
+    }
 
     // --- 3. Generate pitches in parallel ----------------------------
     // Never wrap triggerAndWait in Promise.all — batchTriggerAndWait is the

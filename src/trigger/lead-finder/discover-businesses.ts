@@ -2,7 +2,13 @@ import { task, logger } from "@trigger.dev/sdk";
 
 /**
  * Finds small-to-medium businesses in the NJ / NY metro area using the
- * Google Places API (New) Text Search endpoint.
+ * OpenStreetMap Overpass API — no signup, no API key, no billing account of
+ * any kind. Both Google Places and Foursquare required a credit card to get
+ * past their sandbox tier, so discovery runs on OSM instead.
+ *
+ * Trade-off: OSM has no ratings or review counts, and fewer small businesses
+ * have their website tagged than on Google or Foursquare, so some weeks
+ * fewer than the target lead count will survive the domain filter.
  *
  * Search targets rotate week to week so consecutive Mondays surface
  * different businesses instead of the same top results every time.
@@ -22,61 +28,74 @@ export type Business = {
   city: string;
 };
 
-/** Cities across the NJ / NY metro area, rotated weekly. */
-const CITIES = [
-  "Newark NJ",
-  "Jersey City NJ",
-  "Hoboken NJ",
-  "Montclair NJ",
-  "Morristown NJ",
-  "Princeton NJ",
-  "Edison NJ",
-  "New Brunswick NJ",
-  "Hackensack NJ",
-  "Paramus NJ",
-  "Cherry Hill NJ",
-  "Brooklyn NY",
-  "Queens NY",
-  "White Plains NY",
-  "Yonkers NY",
-  "New Rochelle NY",
-  "Long Island City NY",
-  "Huntington NY",
+type Bbox = [south: number, west: number, north: number, east: number];
+
+/**
+ * Cities across the NJ / NY metro area, rotated weekly. Bounding boxes are
+ * approximate (roughly a 5-8km radius around the city center) — precision
+ * doesn't matter here, just reasonable coverage of the town.
+ */
+const CITIES: Array<{ label: string; bbox: Bbox }> = [
+  { label: "Newark NJ", bbox: [40.69, -74.23, 40.78, -74.11] },
+  { label: "Jersey City NJ", bbox: [40.68, -74.1, 40.76, -73.98] },
+  { label: "Hoboken NJ", bbox: [40.72, -74.06, 40.77, -74.0] },
+  { label: "Montclair NJ", bbox: [40.79, -74.25, 40.86, -74.16] },
+  { label: "Morristown NJ", bbox: [40.75, -74.53, 40.84, -74.43] },
+  { label: "Princeton NJ", bbox: [40.31, -74.71, 40.4, -74.62] },
+  { label: "Edison NJ", bbox: [40.47, -74.46, 40.57, -74.36] },
+  { label: "New Brunswick NJ", bbox: [40.45, -74.5, 40.53, -74.4] },
+  { label: "Hackensack NJ", bbox: [40.85, -74.09, 40.92, -74.0] },
+  { label: "Paramus NJ", bbox: [40.9, -74.12, 40.98, -74.03] },
+  { label: "Cherry Hill NJ", bbox: [39.89, -75.08, 39.98, -74.98] },
+  // Brooklyn/Queens are narrowed to specific neighborhoods rather than the
+  // whole borough — the full-borough boxes returned so many tagged
+  // businesses for common categories that Overpass repeatedly timed out.
+  { label: "Park Slope, Brooklyn NY", bbox: [40.66, -73.99, 40.68, -73.96] },
+  { label: "Astoria, Queens NY", bbox: [40.75, -73.94, 40.78, -73.9] },
+  { label: "White Plains NY", bbox: [41.0, -73.8, 41.07, -73.73] },
+  { label: "Yonkers NY", bbox: [40.9, -73.94, 40.97, -73.85] },
+  { label: "New Rochelle NY", bbox: [40.87, -73.82, 40.95, -73.74] },
+  { label: "Long Island City NY", bbox: [40.73, -73.97, 40.76, -73.92] },
+  { label: "Huntington NY", bbox: [40.83, -73.47, 40.91, -73.38] },
 ];
 
-/** Business categories per vertical, phrased as Google Places search terms. */
-const VERTICALS: Record<string, string[]> = {
+/**
+ * Business categories per vertical, mapped to OpenStreetMap tag filters.
+ * `label` is the human-readable category shown in the digest; `filter` is
+ * the Overpass QL tag match used to actually query OSM.
+ */
+const VERTICALS: Record<string, Array<{ label: string; filter: string }>> = {
   professional: [
-    "law firm",
-    "accounting firm",
-    "insurance agency",
-    "real estate brokerage",
-    "financial advisor office",
-    "title company",
+    { label: "law firm", filter: '["office"="lawyer"]' },
+    { label: "accounting firm", filter: '["office"="accountant"]' },
+    { label: "insurance agency", filter: '["office"="insurance"]' },
+    { label: "real estate brokerage", filter: '["office"="estate_agent"]' },
+    { label: "financial advisor office", filter: '["office"="financial_advisor"]' },
+    { label: "tax preparation service", filter: '["office"="tax_advisor"]' },
   ],
   home_services: [
-    "HVAC contractor",
-    "plumbing company",
-    "electrical contractor",
-    "roofing contractor",
-    "landscaping company",
-    "pest control company",
+    { label: "HVAC contractor", filter: '["craft"="hvac"]' },
+    { label: "plumbing company", filter: '["craft"="plumber"]' },
+    { label: "electrical contractor", filter: '["craft"="electrician"]' },
+    { label: "roofing contractor", filter: '["craft"="roofer"]' },
+    { label: "landscaping company", filter: '["craft"="gardener"]' },
+    { label: "locksmith", filter: '["shop"="locksmith"]' },
   ],
   healthcare: [
-    "dental practice",
-    "med spa",
-    "chiropractor",
-    "physical therapy clinic",
-    "veterinary clinic",
-    "optometrist office",
+    { label: "dental practice", filter: '["amenity"="dentist"]' },
+    { label: "med spa", filter: '["shop"="beauty"]' },
+    { label: "chiropractor", filter: '["healthcare"="chiropractor"]' },
+    { label: "physical therapy clinic", filter: '["healthcare"="physiotherapist"]' },
+    { label: "veterinary clinic", filter: '["amenity"="veterinary"]' },
+    { label: "optometrist office", filter: '["healthcare"="optometrist"]' },
   ],
   retail: [
-    "hair salon",
-    "gym",
-    "restaurant",
-    "auto repair shop",
-    "florist",
-    "dry cleaner",
+    { label: "hair salon", filter: '["shop"="hairdresser"]' },
+    { label: "gym", filter: '["leisure"="fitness_centre"]' },
+    { label: "restaurant", filter: '["amenity"="restaurant"]' },
+    { label: "auto repair shop", filter: '["shop"="car_repair"]' },
+    { label: "florist", filter: '["shop"="florist"]' },
+    { label: "dry cleaner", filter: '["shop"="dry_cleaning"]' },
   ],
 };
 
@@ -138,17 +157,14 @@ const NON_DOMAINS = [
   "google.com",
 ];
 
-type PlacesResponse = {
-  places?: Array<{
-    id?: string;
-    displayName?: { text?: string };
-    formattedAddress?: string;
-    websiteUri?: string;
-    nationalPhoneNumber?: string;
-    rating?: number;
-    userRatingCount?: number;
-    primaryTypeDisplayName?: { text?: string };
-  }>;
+type OverpassElement = {
+  type: "node" | "way" | "relation";
+  id: number;
+  tags?: Record<string, string>;
+};
+
+type OverpassResponse = {
+  elements?: OverpassElement[];
 };
 
 /** ISO week number — drives the deterministic weekly rotation. */
@@ -162,64 +178,104 @@ function isoWeek(date: Date): number {
 }
 
 /** Extracts a bare registrable domain from a website URL. */
-function toDomain(websiteUri: string): string | null {
+function toDomain(rawUrl: string): string | null {
   try {
-    const host = new URL(websiteUri).hostname.toLowerCase();
+    const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    const host = new URL(withScheme).hostname.toLowerCase();
     return host.startsWith("www.") ? host.slice(4) : host;
   } catch {
     return null;
   }
 }
 
-async function searchPlaces(
-  apiKey: string,
-  textQuery: string,
-): Promise<PlacesResponse> {
-  const response = await fetch(
-    "https://places.googleapis.com/v1/places:searchText",
-    {
+/** Builds a readable address from whatever addr:* tags OSM has on file. */
+function formatAddress(tags: Record<string, string>): string {
+  const parts = [
+    [tags["addr:housenumber"], tags["addr:street"]].filter(Boolean).join(" "),
+    tags["addr:city"],
+    [tags["addr:state"], tags["addr:postcode"]].filter(Boolean).join(" "),
+  ].filter(Boolean);
+  return parts.join(", ");
+}
+
+// Confirmed by direct testing: overpass-api.de is the one public mirror that
+// actually responds from this network. The other common public mirrors
+// (kumi.systems, openstreetmap.ru) either hang without responding or are
+// unreachable outright — falling through to them only wasted time.
+const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+
+async function searchOverpass(
+  filter: string,
+  bbox: Bbox,
+  attempt = 1,
+): Promise<OverpassResponse> {
+  const [south, west, north, east] = bbox;
+  const box = `${south},${west},${north},${east}`;
+  const query = `[out:json][timeout:25];(node${filter}(${box});way${filter}(${box}););out center 30;`;
+
+  // A stuck connection with no timeout can hang far longer than any retry
+  // backoff accounts for — bound every request explicitly instead.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+
+  let response: Response;
+  try {
+    response = await fetch(OVERPASS_URL, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": apiKey,
-        // Field mask controls both the response shape and the billing SKU.
-        // Volume here is ~32 calls/month, far inside the free allowance.
-        "X-Goog-FieldMask": [
-          "places.id",
-          "places.displayName",
-          "places.formattedAddress",
-          "places.websiteUri",
-          "places.nationalPhoneNumber",
-          "places.rating",
-          "places.userRatingCount",
-          "places.primaryTypeDisplayName",
-        ].join(","),
+        "Content-Type": "text/plain",
+        // Overpass's public server asks non-browser clients to self-identify.
+        "User-Agent": "trigger-lead-finder/1.0",
       },
-      body: JSON.stringify({
-        textQuery,
-        pageSize: 20,
-        regionCode: "US",
-        languageCode: "en",
-      }),
-    },
-  );
+      body: query,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    if (attempt < 4) {
+      const delayMs = attempt * 6_000;
+      logger.warn("Overpass request failed, retrying", {
+        filter,
+        attempt,
+        delayMs,
+        error: String(error),
+      });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return searchOverpass(filter, bbox, attempt + 1);
+    }
+    throw error;
+  }
+  clearTimeout(timeout);
 
   if (!response.ok) {
+    if ((response.status === 429 || response.status === 504) && attempt < 4) {
+      const delayMs = attempt * 6_000;
+      logger.warn("Overpass busy, retrying", {
+        status: response.status,
+        filter,
+        attempt,
+        delayMs,
+      });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return searchOverpass(filter, bbox, attempt + 1);
+    }
+
     const body = await response.text();
     throw new Error(
-      `Google Places search failed (${response.status}) for "${textQuery}": ${body}`,
+      `Overpass search failed (${response.status}) for filter ${filter}: ${body.slice(0, 300)}`,
     );
   }
 
-  return (await response.json()) as PlacesResponse;
+  return (await response.json()) as OverpassResponse;
 }
 
 export const discoverBusinesses = task({
   id: "discover-businesses",
+  // More searches per run (scaled to targetCount) means more headroom is
+  // needed than the 900s project default, especially if Overpass needs
+  // retries on several of them.
+  maxDuration: 1500,
   run: async (payload: { targetCount: number; verticals: string[] }) => {
-    const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-    if (!apiKey) throw new Error("GOOGLE_PLACES_API_KEY is not set");
-
     const week = isoWeek(new Date());
     const verticals = payload.verticals.filter((v) => v in VERTICALS);
     if (verticals.length === 0) {
@@ -228,37 +284,47 @@ export const discoverBusinesses = task({
       );
     }
 
-    // Build this week's search list: one city+category pair per vertical,
-    // stepped by week number so the targets move every Monday.
+    // Build this week's search list: several city+category pairs per
+    // vertical, stepped by week number so the targets move every Monday.
+    // Scales with targetCount — a fixed 2-per-vertical search count caps
+    // the raw candidate pool no matter how many leads are requested, since
+    // many OSM entries have no website tag and get filtered out downstream.
+    // Bounded at 6/vertical so a single discovery run stays well inside
+    // the task's maxDuration even when every search needs a retry.
+    const offsetsPerVertical = Math.min(
+      6,
+      Math.max(2, Math.ceil(payload.targetCount / verticals.length / 3)),
+    );
     const searches = verticals.flatMap((vertical, vIndex) => {
       const categories = VERTICALS[vertical];
-      return [0, 1].map((offset) => {
+      return Array.from({ length: offsetsPerVertical }, (_, offset) => {
         const seed = week * 3 + vIndex * 5 + offset * 7;
         const city = CITIES[seed % CITIES.length];
         const category = categories[seed % categories.length];
-        return { vertical, category, city, query: `${category} in ${city}` };
+        return { vertical, category, city };
       });
     });
 
-    logger.info("Searching Google Places", {
+    logger.info("Searching OpenStreetMap", {
       week,
       searchCount: searches.length,
-      queries: searches.map((s) => s.query),
+      queries: searches.map((s) => `${s.category.label} near ${s.city.label}`),
     });
 
     const seenDomains = new Set<string>();
     const businesses: Business[] = [];
 
     for (const search of searches) {
-      const result = await searchPlaces(apiKey, search.query);
-      const places = result.places ?? [];
+      const result = await searchOverpass(search.category.filter, search.city.bbox);
+      const elements = result.elements ?? [];
 
-      for (const place of places) {
-        const website = place.websiteUri;
-        const name = place.displayName?.text;
-        if (!website || !name || !place.id) continue;
+      for (const element of elements) {
+        const tags = element.tags;
+        const name = tags?.name;
+        const rawWebsite = tags?.website ?? tags?.["contact:website"];
+        if (!tags || !name || !rawWebsite) continue;
 
-        const domain = toDomain(website);
+        const domain = toDomain(rawWebsite);
         if (!domain) continue;
 
         // One lead per company, even if it appears in several searches.
@@ -274,24 +340,24 @@ export const discoverBusinesses = task({
 
         seenDomains.add(domain);
         businesses.push({
-          placeId: place.id,
+          placeId: `osm-${element.type}-${element.id}`,
           name,
-          address: place.formattedAddress ?? "",
-          website,
+          address: formatAddress(tags),
+          website: /^https?:\/\//i.test(rawWebsite) ? rawWebsite : `https://${rawWebsite}`,
           domain,
-          phone: place.nationalPhoneNumber ?? null,
-          rating: place.rating ?? null,
-          reviewCount: place.userRatingCount ?? null,
+          phone: tags.phone ?? tags["contact:phone"] ?? null,
+          // OSM carries no rating or review data.
+          rating: null,
+          reviewCount: null,
           vertical: search.vertical,
-          category: search.category,
-          city: search.city,
+          category: search.category.label,
+          city: search.city.label,
         });
       }
-    }
 
-    // An established business with real reviews is more likely to have budget
-    // and a real operational workload. Sort by review count, richest first.
-    businesses.sort((a, b) => (b.reviewCount ?? 0) - (a.reviewCount ?? 0));
+      // Be a polite citizen of the free, shared public Overpass server.
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
 
     // Interleave verticals so one category can't monopolise the whole digest.
     const byVertical = new Map<string, Business[]>();
