@@ -1,0 +1,21 @@
+{
+  "name": "trigger-ai-catcher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx trigger.dev@4.5.9 dev",
+    "deploy": "npx trigger.dev@4.5.9 deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@trigger.dev/sdk": "4.5.9",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "trigger.dev": "4.5.9",
+    "typescript": "^5.7.0"
+  }
+}
